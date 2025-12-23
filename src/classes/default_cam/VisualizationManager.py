@@ -44,7 +44,7 @@ class VisualizationManager:
 
         return frame_time, current_fps, avg_fps, avg_time
 
-    def draw_detections(self, frame: np.ndarray, detections: List[Detection]) -> np.ndarray:
+    def draw_detections(self, frame: np.ndarray, detections: List[Detection], is_touched: bool = False) -> np.ndarray:
         """Отрисовка детекций"""
         debug_frame = frame.copy()
 
@@ -53,7 +53,10 @@ class VisualizationManager:
             rect = cv2.minAreaRect(detection.contour)
             box = cv2.boxPoints(rect)
             box = np.int32(box)
-            cv2.drawContours(debug_frame, [box], 0, (150, 150, 150), 1)
+            color = (150, 150, 150)
+            if is_touched:
+                color = (0, 0, 255)
+            cv2.drawContours(debug_frame, [box], 0, color, 1)
 
         return debug_frame
 

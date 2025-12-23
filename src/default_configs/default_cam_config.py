@@ -8,7 +8,7 @@ DEFAULT_CONFIG = {
     'min_speed': 20.0,
     'max_speed': 250.0,
     'track_distance': 350,
-    'max_missed_frames': 3,
+    'max_missed_frames': 5,
     'max_aspect_ratio': 6.0,
     'motion_threshold': 25,
     'background_history': 100,

@@ -76,3 +76,11 @@ class ThreadSafeSingleton:
     def get_timestamp_default_cam(self) -> int:
         with self.cameras._lock:
             return self.cameras.default_cam.timestamp
+
+    def set_touched_depth_cam(self, touched: bool):
+        with self.cameras._lock:
+            self.cameras.depth_cam.set_touched(touched)
+
+    def get_touched_state_depth_cam(self) -> bool:
+        with self.cameras._lock:
+            return self.cameras.depth_cam.touched_state
