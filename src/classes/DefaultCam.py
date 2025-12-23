@@ -84,14 +84,15 @@ class DefaultCamProcessor:
 
         # Фильтрация детекций
         detections = self.detection_filter.filter_contours(contours)
+        is_touched = self._get_touched_state(state)
 
         # Трекинг
         trajectories = self.tracker.update(detections)
 
         # Визуализация
-        debug_frame = self.visualization.draw_detections(frame, detections)
+        debug_frame = self.visualization.draw_detections(frame, detections, is_touched)
         debug_frame = self.visualization.draw_trajectories(
-            debug_frame, trajectories, self.tracker.colors
+            debug_frame, trajectories, self.tracker.colors,
         )
 
         # Измерение производительности
@@ -111,6 +112,9 @@ class DefaultCamProcessor:
         cv2.imshow('Mask', motion_mask)
 
         return True
+
+    def _get_touched_state(self, state):
+        return state.get_touched_state_depth_cam()
 
     def _update_state(self, state, timestamp: float):
         """Обновление состояния синхронизации"""

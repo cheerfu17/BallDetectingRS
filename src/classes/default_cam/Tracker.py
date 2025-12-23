@@ -45,6 +45,7 @@ class Tracker:
         """Обработка отдельной детекции"""
         best_id, min_dist = self._find_best_match(detection.center)
 
+
         if best_id != -1:
             # Обновление существующей траектории
             self._update_trajectory(best_id, detection)
@@ -70,6 +71,9 @@ class Tracker:
                 best_id = traj_id
 
         return best_id, min_dist
+
+    def _check_touched_from_depth_cam(self, touched: bool):
+        pass
 
     def _update_trajectory(self, traj_id: int, detection: Detection):
         """Обновление существующей траектории"""
