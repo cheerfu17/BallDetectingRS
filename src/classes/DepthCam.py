@@ -109,8 +109,10 @@ class BagFileProcessor:
             # Визуализация
             processed_frame = self.visualization.add_roi_overlay(processed_frame)
 
+            is_touched = True if detections else False
+
             # Обновление состояния
-            self._update_state(state, timestamp)
+            self._update_state(state, timestamp, is_touched)
 
             # Добавление информационной панели
             info = {
@@ -127,6 +129,7 @@ class BagFileProcessor:
             for detection in detections:
                 self.csv_writer.write_detection(detection)
                 self.total_detections += 1
+
 
             # Запись видео
             self.video_writer.write(processed_frame, debug_frame)
@@ -149,9 +152,14 @@ class BagFileProcessor:
                 logger.error(f"Ошибка при обработке кадра: {e}")
                 raise
 
-    def _update_state(self, state, timestamp):
+    def _update_state(self, state, timestamp, is_touch = False):
         """Обновление состояния синхронизации"""
         state.set_timestamp_depth_cam(timestamp)
+
+        if is_touch:
+            state.set_touched_depth_cam(True)
+        else:
+            state.set_touched_depth_cam(False)
 
         if (timestamp - state.get_timestamp_default_cam() < 0):
             state.pause_default_cam()
