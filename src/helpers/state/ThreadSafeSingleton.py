@@ -1,86 +1,146 @@
-from threading import Lock, Event
-from src.helpers.state.CameraManager import CameraManager
+from threading import Lock, Condition, Event
 from typing import List, Any
+import csv
+import os
+from datetime import datetime
 
 class ThreadSafeSingleton:
-    """Потокобезопасный синглтон с управлением камерами"""
-
+    """
+    Синхронизатор с диагностикой.
+    """
     _instance = None
     _lock = Lock()
 
     def __new__(cls):
         with cls._lock:
             if cls._instance is None:
-                print("Создаю новый экземпляр синглтона")
                 cls._instance = super().__new__(cls)
                 cls._instance._initialize()
-        return cls._instance
+            return cls._instance
 
     def _initialize(self):
-        """Приватная инициализация экземпляра"""
-        print("Инициализирую синглтон...")
+        print("Инициализация системы синхронизации...")
+        
+        self._sync_lock = Lock()
+        self._sync_condition = Condition(self._sync_lock)
 
-        # Данные с камер
-        self.data_from_depth_cam: List[Any] = []
+        self.depth_timestamp = -1.0
+        self.default_timestamp = -1.0
+        
+        self.default_coords = []
+        self.default_frame_num = 0
+        self.depth_in_polygon = False
 
-        # Менеджер камер
-        self.cameras = CameraManager()
+        # Порог синхронизации 35мс (чуть больше одного кадра 30fps)
+        self.SYNC_THRESHOLD_MS = 100.0 
+        self.MAX_AHEAD_MS = 100.0 # Увеличим буфер
 
-        # Общие атрибуты
-        self.counter = 0
-        self.pause_event = Event()
-        self.pause_event.set()
+        self._init_results_file()
+        
+        # Флаг для остановки всех потоков, если один завершился
+        self.stop_event = Event()
 
-        # Флаг инициализации
-        self._initialized = True
+    def _init_results_file(self):
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        root_dir = os.path.abspath(os.path.join(current_dir, '..', '..', '..'))
+        output_dir = os.path.join(root_dir, 'data', 'output')
+        os.makedirs(output_dir, exist_ok=True)
+        
+        filename = f"valid_hits_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        self.csv_path = os.path.join(output_dir, filename)
+        
+        with open(self.csv_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['Frame_Default', 'Timestamp_Default', 'Coords_Default', 'Timestamp_Realsense', 'Time_Diff'])
+        
+        print(f"ФАЙЛ РЕЗУЛЬТАТОВ: {self.csv_path}")
 
-    # Делегированные методы для работы с камерами
-    # Глубинная камера
-    def pause_depth_cam(self):
-        self.cameras.pause_depth()
+    def _write_hit(self, diff):
+        try:
+            with open(self.csv_path, 'a', newline='') as f:
+                writer = csv.writer(f)
+                coords_str = ";".join([f"({x},{y})" for x, y in self.default_coords])
+                
+                writer.writerow([
+                    self.default_frame_num,
+                    f"{self.default_timestamp:.1f}",
+                    coords_str,
+                    f"{self.depth_timestamp:.1f}",
+                    f"{diff:.1f}"
+                ])
+                print(f">>> ЗАПИСАНО! DefaultFrame: {self.default_frame_num} | Coords: {coords_str} | Diff: {diff:.1f}ms")
+        except Exception as e:
+            print(f"Ошибка записи: {e}")
 
-    def resume_depth_cam(self):
-        self.cameras.resume_depth()
+    def request_stop(self):
+        """Сигнал всем потокам остановиться"""
+        self.stop_event.set()
+        with self._sync_condition:
+            self._sync_condition.notify_all()
 
-    def get_event_depth_cam(self) -> Event:
-        return self.cameras.depth_cam.event
+    def should_stop(self):
+        return self.stop_event.is_set()
 
-    def get_paused_depth_cam(self) -> bool:
-        return self.cameras.depth_cam.paused
+    def sync_depth_cam(self, timestamp: float, is_in_polygon: bool):
+        if self.stop_event.is_set(): return
 
-    def set_timestamp_depth_cam(self, timestamp: int):
-        with self.cameras._lock:
-            self.cameras.depth_cam.timestamp = timestamp
+        with self._sync_condition:
+            self.depth_timestamp = timestamp
+            self.depth_in_polygon = is_in_polygon
+            
+            # Ждем DefaultCam
+            while (self.default_timestamp >= 0 and 
+                   self.depth_timestamp > self.default_timestamp + self.MAX_AHEAD_MS and
+                   not self.stop_event.is_set()):
+                self._sync_condition.wait(timeout=0.1) # Таймаут чтобы проверять stop_event
 
-    def get_timestamp_depth_cam(self) -> int:
-        with self.cameras._lock:
-            return self.cameras.depth_cam.timestamp
+            self._check_and_record()
+            self._sync_condition.notify_all()
 
-    # Обычная камера
-    def pause_default_cam(self):
-        self.cameras.pause_default()
+    def sync_default_cam(self, timestamp: float, coords: Any, frame_num: int):
+        if self.stop_event.is_set(): return
 
-    def resume_default_cam(self):
-        self.cameras.resume_default()
+        with self._sync_condition:
+            self.default_timestamp = timestamp
+            self.default_coords = coords
+            self.default_frame_num = frame_num
 
-    def get_event_default_cam(self) -> Event:
-        return self.cameras.default_cam.event
+            # Ждем DepthCam
+            while (self.depth_timestamp >= 0 and 
+                   self.default_timestamp > self.depth_timestamp + self.MAX_AHEAD_MS and
+                   not self.stop_event.is_set()):
+                self._sync_condition.wait(timeout=0.1)
 
-    def get_paused_default_cam(self) -> bool:
-        return self.cameras.default_cam.paused
+            self._check_and_record()
+            self._sync_condition.notify_all()
 
-    def set_timestamp_default_cam(self, timestamp: int):
-        with self.cameras._lock:
-            self.cameras.default_cam.timestamp = timestamp
+    def _check_and_record(self):
+        if self.depth_timestamp < 0 or self.default_timestamp < 0:
+            return
 
-    def get_timestamp_default_cam(self) -> int:
-        with self.cameras._lock:
-            return self.cameras.default_cam.timestamp
+        diff = abs(self.depth_timestamp - self.default_timestamp)
+        
+        # ЛОГИКА ЗАПИСИ
+        if self.depth_in_polygon:
+            if diff <= self.SYNC_THRESHOLD_MS:
+                if self.default_coords:
+                    self._write_hit(diff)
+                else:
+                    # Попадание в полигон ЕСТЬ, синхронизация ЕСТЬ, но обычная камера НИЧЕГО НЕ НАШЛА
+                    print(f"Missed Hit: Polygon YES, Sync YES ({diff:.1f}ms), but Default Coords EMPTY")
+                    pass
+            else:
+                # Попадание в полигон ЕСТЬ, но РАССИНХРОН
+                print(f"Missed Hit: Polygon YES, but Sync NO (Diff: {diff:.1f}ms > {self.SYNC_THRESHOLD_MS})")
+                pass
 
-    def set_touched_depth_cam(self, touched: bool):
-        with self.cameras._lock:
-            self.cameras.depth_cam.set_touched(touched)
-
-    def get_touched_state_depth_cam(self) -> bool:
-        with self.cameras._lock:
-            return self.cameras.depth_cam.touched_state
+    # Заглушки
+    def get_paused_default_cam(self): return False
+    def get_paused_depth_cam(self): return False
+    def pause_default_cam(self): pass
+    def resume_default_cam(self): pass
+    def set_timestamp_depth_cam(self, t): pass
+    def set_timestamp_default_cam(self, t): pass
+    def get_event_default_cam(self):
+        from threading import Event
+        e = Event(); e.set(); return e

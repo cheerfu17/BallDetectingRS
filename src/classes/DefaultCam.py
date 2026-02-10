@@ -2,8 +2,6 @@ import cv2
 import numpy as np
 from os import path
 import logging
-
-
 from src.classes.general.VideoWriterManager import VideoWriterManager
 from src.classes.default_cam.VisualizationManager import VisualizationManager
 from src.classes.general.data.CameraConfig import CameraConfig
@@ -16,176 +14,121 @@ from src.default_configs.default_cam_config import DEFAULT_CONFIG
 
 parent_dir = path.dirname(path.abspath(__file__))
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
 class DefaultCamProcessor:
-    """Основной класс для обработки видео с обычной камеры"""
-
-    def __init__(self, video_path: str, output_path: str, mask_output_path: str,
-                 config: dict = None):
+    def __init__(self, video_path: str, output_path: str, mask_output_path: str, config: dict = None):
         self.video_path = video_path
         self.output_path = output_path
         self.mask_output_path = mask_output_path
         self.config = {**DEFAULT_CONFIG, **(config or {})}
-
-        # Инициализация компонентов
+        
         self.video_processor = VideoProcessor(video_path)
-        config = CameraConfig(
+        
+        config_cam = CameraConfig(
             width=self.video_processor.width,
             height=self.video_processor.height,
             fps=self.video_processor.fps,
             depth_scale=0.0
         )
 
-        self.video_writer = VideoWriterManager(
-            output_path, mask_output_path,
-            config
-        )
+        self.video_writer = VideoWriterManager(output_path, mask_output_path, config_cam)
         self.timestamp_reader = TimestampReader(self.config['csv_file'])
         self.motion_detector = MotionDetector(self.config)
         self.detection_filter = DetectionFilter(self.config)
         self.tracker = Tracker(self.config)
-        self.visualization = VisualizationManager(
-            self.video_processor.width, self.video_processor.height
-        )
-
+        self.visualization = VisualizationManager(self.video_processor.width, self.video_processor.height)
+        
         self.paused = False
-        logger.info(f"DefaultCamProcessor инициализирован для видео: {video_path}")
+        self._is_initialized = False
+        logger.info(f"DefaultCamProcessor создан для: {video_path}")
 
     def initialize(self):
-        """Инициализация всех компонентов"""
+        if self._is_initialized:
+            return
         self.video_writer.initialize()
-        logger.info("Все компоненты инициализированы")
+        self._is_initialized = True
+        logger.info("DefaultCam инициализирован")
 
     def process_frame(self, state) -> bool:
-        """Обработка одного кадра"""
-        # Чтение кадра
         ret, frame = self.video_processor.read_frame()
         if not ret:
             return False
 
-        # Получение временной метки
         timestamp = self.timestamp_reader.get_timestamp(self.video_processor.frame_count - 1)
-
-        # Обновление состояния
-        self._update_state(state, timestamp)
-
-        # Запуск таймера для измерения производительности
         self.visualization.start_frame_timer()
 
-        # Детекция движения
         motion_mask = self.motion_detector.process_frame(frame)
-
-        # Поиск контуров
         contours, _ = cv2.findContours(motion_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        # Фильтрация детекций
         detections = self.detection_filter.filter_contours(contours)
-        is_touched = self._get_touched_state(state)
-
-        # Трекинг
         trajectories = self.tracker.update(detections)
 
-        # Визуализация
-        debug_frame = self.visualization.draw_detections(frame, detections, is_touched)
-        debug_frame = self.visualization.draw_trajectories(
-            debug_frame, trajectories, self.tracker.colors,
-        )
+        detection_centers = []
+        for det in detections:
+            if hasattr(det, 'center'):
+                detection_centers.append(det.center)
+            elif isinstance(det, (list, tuple, np.ndarray)) and len(det) >= 4:
+                x, y, w, h = det[:4]
+                center = (int(x + w/2), int(y + h/2))
+                detection_centers.append(center)
+        
+        state.sync_default_cam(timestamp, detection_centers, self.video_processor.frame_count)
 
-        # Измерение производительности
+        debug_frame = self.visualization.draw_detections(frame, detections)
+        debug_frame = self.visualization.draw_trajectories(debug_frame, trajectories, self.tracker.colors)
+        
         frame_time, current_fps, avg_fps, avg_time = self.visualization.end_frame_timer()
-
-        # Добавление информационной панели
         debug_frame = self.visualization.draw_info_panel(
             debug_frame, self.video_processor.frame_count, frame_time,
             current_fps, avg_fps, timestamp, state
         )
 
-        # Запись результатов
         self.video_writer.write(debug_frame, motion_mask)
-
-        # Отображение
-        cv2.imshow('Tracking', debug_frame)
-        cv2.imshow('Mask', motion_mask)
+        cv2.imshow('Default Tracking', debug_frame)
+        cv2.imshow('Default Mask', motion_mask)
 
         return True
 
-    def _get_touched_state(self, state):
-        return state.get_touched_state_depth_cam()
-
-    def _update_state(self, state, timestamp: float):
-        """Обновление состояния синхронизации"""
-        state.set_timestamp_default_cam(timestamp)
-
-        # if hasattr(state, 'get_timestamp_depth_cam'):
-        #     if (timestamp - state.get_timestamp_depth_cam() < 0):
-        #         if hasattr(state, 'pause_depth_cam'):
-        #             state.pause_depth_cam()
-        #     else:
-        #         if hasattr(state, 'resume_depth_cam'):
-        #             state.resume_depth_cam()
-
     def handle_keyboard(self) -> bool:
-        """Обработка клавиатуры"""
-        key = cv2.waitKey(30) & 0xFF
-
-        if key == 27:  # ESC
+        key = cv2.waitKey(1) & 0xFF
+        if key == 27: 
             return False
         elif key == ord('p') or key == ord('P'):
             self.paused = not self.paused
-            logger.info(f"Пауза: {'включена' if self.paused else 'выключена'}")
-
         return True
 
     def run(self, state):
-        """Основной цикл обработки"""
         try:
-            self.initialize()
-            logger.info("Запуск обработки видео...")
-
-            while True:
-                state.get_event_default_cam().wait()
-
+            if not self._is_initialized:
+                self.initialize()
+                
+            logger.info("Запуск обработки DefaultCam...")
+            while not state.should_stop():
                 if not self.paused:
                     if not self.process_frame(state):
+                        logger.info("DefaultCam: Видео закончилось.")
+                        state.request_stop() # ОСТАНАВЛИВАЕМ ВСЕХ
                         break
-
                 if not self.handle_keyboard():
+                    state.request_stop()
                     break
-
         except KeyboardInterrupt:
-            logger.info("Обработка прервана пользователем")
+            logger.info("DefaultCam прерван пользователем")
         except Exception as e:
-            logger.error(f"Критическая ошибка: {e}")
+            logger.error(f"Ошибка DefaultCam: {e}")
+            state.request_stop()
             raise
         finally:
             self.cleanup()
 
     def cleanup(self):
-        """Очистка ресурсов"""
-        logger.info("Очистка ресурсов...")
-
+        logger.info("Очистка ресурсов DefaultCam...")
         self.video_processor.release()
         self.video_writer.release()
-        # cv2.destroyAllWindows()
-
-        # Вывод статистики
         self._print_statistics()
 
     def _print_statistics(self):
-        """Вывод статистики обработки"""
         if self.visualization.frame_times:
             avg_frame_time = np.mean(self.visualization.frame_times) * 1000
-            avg_fps = 1000 / avg_frame_time if avg_frame_time > 0 else 0
-
-            print(f"\n{'=' * 50}")
-            print("ОБРАБОТКА ЗАВЕРШЕНА")
-            print(f"Обработано кадров: {self.video_processor.frame_count}")
-            print(f"Среднее время на кадр: {avg_frame_time:.2f} ms")
-            print(f"Средний FPS обработки: {avg_fps:.1f}")
-            print(f"Создано траекторий: {self.tracker.next_id}")
-        else:
-            print("\nОбработка завершена (нет данных о производительности)")
+            print(f"DEFAULT CAM: {self.video_processor.frame_count} кадров, {avg_frame_time:.2f} мс/кадр")
