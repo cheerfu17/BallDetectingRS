@@ -2,7 +2,10 @@ import numpy as np
 import cv2
 from os import path
 import logging
+import time
+import pyrealsense2 as rs
 from src.classes.depth_cam.RealsensePipeline import RealsensePipeline
+from src.classes.depth_cam.LiveRealsenseCapture import LiveRealsenseCapture
 from src.classes.general.VideoWriterManager import VideoWriterManager
 from src.classes.depth_cam.CSVWriter import CSVWriter
 from src.classes.depth_cam.DetectionProcessor import DetectionProcessor
@@ -11,14 +14,14 @@ from src.default_configs.depth_cam_config import DEFAULT_CONFIG
 
 parent_dir = path.dirname(path.abspath(__file__))
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class BagFileProcessor:
-    """Основной класс для обработки bag-файлов"""
 
-    def __init__(self, bag_file_path: str, output_video_name: str = None, 
+class DepthCamProcessor:
+    """Основной класс для обработки с камеры глубины RealSense"""
+
+    def __init__(self, bag_file_path: str = None, output_video_name: str = None,
                  output_csv_name: str = None, config: dict = None):
         self.bag_file_path = bag_file_path
         self.config = {**DEFAULT_CONFIG, **(config or {})}
@@ -32,7 +35,19 @@ class BagFileProcessor:
             [93, 298], [306, 270], [575, 270], [785, 293]
         ], dtype=np.int32)
 
-        self.pipeline = RealsensePipeline(bag_file_path)
+        # Выбор источника: файл или живая камера
+        self.use_live_camera = self.config.get('use_live_camera', True)
+
+        if self.use_live_camera:
+            self.pipeline = LiveRealsenseCapture(
+                camera_serial=self.config.get('camera_serial'),
+                record_to_bag=self.config.get('record_to_bag')
+            )
+        else:
+            if not bag_file_path:
+                raise ValueError("bag_file_path должен быть указан при использовании файла")
+            self.pipeline = RealsensePipeline(bag_file_path)
+
         self.detection_processor = DetectionProcessor(
             self.config['distance_min'],
             self.config['distance_max'],
@@ -54,19 +69,21 @@ class BagFileProcessor:
             logger.warning("Попытка повторной инициализации DepthCam. Пропуск.")
             return
 
-        logger.info(f"Начинаю обработку {self.bag_file_path}...")
+        source_type = "живая камера" if self.use_live_camera else f"bag файл {self.bag_file_path}"
+        logger.info(f"Начинаю обработку с {source_type}...")
+
         self.camera_config = self.pipeline.initialize()
-        
+
         self.video_writer = VideoWriterManager(
             self.config['output_video'],
             self.config['debug_video'],
             self.camera_config
         )
         self.video_writer.initialize()
-        
+
         self.csv_writer = CSVWriter(self.config['csv_file'])
         self.csv_writer.initialize()
-        
+
         self.visualization = VisualizationOverlay(
             self.camera_config.width,
             self.camera_config.height,
@@ -110,23 +127,22 @@ class BagFileProcessor:
             self.total_detections += 1
 
             self.video_writer.write(processed_frame, debug_frame)
-            
-            # --- ВЫЗОВ ОТРИСОВКИ ---
+
+            # Отображение кадров
             self._display_frames(processed_frame, debug_frame)
-            # -----------------------
 
             if self.frame_count % 30 == 0 and self.frame_count > 0:
                 logger.info(f"DepthCam Frame {self.frame_count} | Hit: {is_hit_in_polygon}")
-            
+
             self.frame_count += 1
 
-            state.sync_depth_cam(timestamp, is_in_polygon=is_hit_in_polygon)
-            
+            # state.sync_depth_cam(timestamp, is_in_polygon=is_hit_in_polygon)
+
             return True
 
         except RuntimeError as e:
             if "frame didn't arrive" in str(e):
-                logger.info("Обработка завершена (конец файла)")
+                logger.info("Обработка завершена (конец потока)")
                 return False
             else:
                 logger.error(f"Ошибка при обработке кадра: {e}")
@@ -136,7 +152,7 @@ class BagFileProcessor:
         """Отображение кадров"""
         cv2.imshow('Depth Processed', processed_frame)
         cv2.imshow('Depth Debug', debug_frame)
-        
+
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             raise KeyboardInterrupt()
@@ -144,14 +160,13 @@ class BagFileProcessor:
     def run(self, state):
         """Основной цикл обработки"""
         try:
-            # ПРОВЕРКА: Если не инициализировано, инициализируем.
             if not self._is_initialized:
                 self.initialize()
-            
-            logger.info("Запуск обработки DepthCam...")
+
+            logger.info("Запуск обработки DepthCam (живой режим)...")
             while not state.should_stop():
                 if not self.process_frame(state):
-                    logger.info("DepthCam: Bag файл закончился.")
+                    logger.info("DepthCam: Поток закончился.")
                     state.request_stop()
                     break
         except KeyboardInterrupt:
